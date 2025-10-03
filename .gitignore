@@ -1,0 +1,5 @@
+
+# Training artifacts
+transformer/output/
+*.pt
+*.ckpt
