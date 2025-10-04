@@ -15,8 +15,8 @@ from model import GPTConfig, GPT
 from tokenizer.basic_bpe import BasicTokenizer
 
 # hyperparameters
-block_size = 32
-batch_size = 16
+block_size = 512
+batch_size = 32
 max_iters = 2000
 eval_interval = 100
 learning_rate = 1e-3
@@ -36,13 +36,13 @@ print(f"using device: {device}")
 print(f"output directory: {out_dir}")
 
 # model
-n_layer = 8
-n_head = 8
-n_embd = 512
+n_layer = 12
+n_head = 12
+n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 
-# import sys; sys.exit(0)
+import sys; sys.exit(0)
 
 
 torch.manual_seed(327)
