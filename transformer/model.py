@@ -87,6 +87,21 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
+
+class SinusoidalTimeEmbedding(nn.Module):
+    def __init__(self, time_embed_dim, scaled_time_embed_dim):
+        super().__init__()
+        self.inv_freqs = nn.Parameter(1.0 / (10000 ** (torch.arange(0, time_embed_dim, 2).float() / (time_embed_dim/2))), requires_grad=False)
+        
+        self.time_mlp = nn.Sequential(nn.Linear(time_embed_dim, scaled_time_embed_dim), 
+                                      nn.SiLU(), 
+                                      nn.Linear(scaled_time_embed_dim, scaled_time_embed_dim), 
+                                      nn.SiLU())
+    def forward(self, timesteps):
+        timestep_freqs = timesteps.unsqueeze(1) * self.inv_freqs.unsqueeze(0)
+        embeddings = torch.cat([torch.sin(timestep_freqs), torch.cos(timestep_freqs)], axis=-1)
+        embeddings = self.time_mlp(embeddings)
+        return embeddings
     
 @dataclass
 class GPTConfig:
@@ -98,6 +113,8 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    use_time_conditioning: bool = False
+    time_embed_dim: int = 256
     
 class GPT(nn.Module):
     
@@ -115,6 +132,12 @@ class GPT(nn.Module):
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # Time conditioning
+        if config.use_time_conditioning:
+            self.time_embed = SinusoidalTimeEmbedding(config.time_embed_dim, config.n_embd)
+        else:
+            self.time_embed = None
         # self.transformer.wte.weight = self.lm_head.weight
         self.transformer['wte'].weight = self.lm_head.weight
         
@@ -139,15 +162,25 @@ class GPT(nn.Module):
             elif isinstance(module, nn.Embedding):
                 torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, timesteps=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of len {t}, block size only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device)
-        
+
         tok_emb = self.transformer.wte(idx)
         pos_emb = self.transformer.wpe(idx)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        x = tok_emb + pos_emb
+
+        # Add time conditioning if enabled
+        if self.time_embed is not None:
+            if timesteps is None:
+                timesteps = torch.zeros(b, device=device)
+            time_emb = self.time_embed(timesteps)  # (B, n_embd)
+            # Broadcast time embedding across sequence dimension
+            x = x + time_emb.unsqueeze(1)  # (B, T, n_embd) + (B, 1, n_embd)
+
+        x = self.transformer.drop(x)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -162,7 +195,7 @@ class GPT(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, timesteps=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -172,7 +205,7 @@ class GPT(nn.Module):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _ = self(idx_cond, timesteps=timesteps)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
