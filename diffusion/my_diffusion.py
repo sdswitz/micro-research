@@ -11,7 +11,8 @@ from torchvision import transforms
 from PIL import Image
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
-from transformers import get_cosine_schedule_with_warmup
+# from transformers import get_cosine_schedule_with_warmup
+from transformers.optimization import get_cosine_schedule_with_warmup
 import itertools
 
 class Sampler:
@@ -201,7 +202,7 @@ class SinusoidalTimeEmbedding(nn.Module):
                                       nn.Linear(scaled_time_embed_dim, scaled_time_embed_dim),
                                       nn.SiLU())
         
-    def forward(self, timsteps):
+    def forward(self, timesteps):
         
         timestem_freqs = timesteps.unsqueeze(1) * self.inv_freq.unsqueeze(0)
         
