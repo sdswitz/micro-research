@@ -1,0 +1,591 @@
+---
+title: "iLOCO: Distribution-Free Inference for Feature Interactions"
+author: "Samuel Switz"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## iLOCO
+
+The iLOCO metric measures pairwise feature interactions by comparing the effect of removing features individually vs jointly:
+
+$$\text{iLOCO}_{j,k} = \Delta_j + \Delta_k - \Delta_{j,k}$$
+
+where $\Delta_j$ is the change in prediction error when feature $j$ is removed.
+
+### Data Setup (Scenario i from paper)
+```{r}
+set.seed(327)
+M <- 10
+N <- 500
+B <- c(rnorm(5, 2, sqrt(0.5)), rep(0, 5))
+
+X <- matrix(rnorm(M*N), nrow = N, ncol = M)
+
+snr <- 2
+
+# True interaction between features 1 and 2
+f_X <- snr*(X[,1] * X[,2]) + X %*% B
+e <- rnorm(N)
+Y <- f_X + e
+```
+
+### iLOCO via Data Splitting (Algorithm 1)
+
+```{r}
+#' Compute iLOCO metric via data splitting
+#'
+#' @param X Feature matrix (N x M)
+#' @param Y Response vector (N x 1)
+#' @param j First feature index for interaction
+#' @param k Second feature index for interaction
+#' @param train_frac Fraction of data for training (default 0.5)
+#' @param fit_model Function to fit model: function(X, Y) -> model
+#' @param predict_model Function to predict: function(model, X) -> predictions
+#' @param error_fn Error function: function(y_true, y_pred) -> error (default MSE)
+#' @return List with iLOCO estimate, confidence interval, and component deltas
+iLOCO_split <- function(X, Y, j, k, train_frac = 0.5,
+                        fit_model = NULL, predict_model = NULL,
+                        error_fn = function(y, yhat) (y - yhat)^2,
+                        alpha = 0.1) {
+
+  N <- nrow(X)
+  M <- ncol(X)
+
+  # Default to linear regression if no model specified
+  if (is.null(fit_model)) {
+    fit_model <- function(X, Y) lm(Y ~ ., data = data.frame(Y = Y, X))
+  }
+  if (is.null(predict_model)) {
+    predict_model <- function(model, X) predict(model, newdata = data.frame(X))
+  }
+
+  # Split data
+  train_idx <- sample(1:N, size = floor(train_frac * N))
+  test_idx <- setdiff(1:N, train_idx)
+
+  X_train <- X[train_idx, , drop = FALSE]
+  Y_train <- Y[train_idx]
+  X_test <- X[test_idx, , drop = FALSE]
+  Y_test <- Y[test_idx]
+
+  # Train full model
+  f_full <- fit_model(X_train, Y_train)
+
+  # Train model without feature j
+  f_minus_j <- fit_model(X_train[, -j, drop = FALSE], Y_train)
+
+  # Train model without feature k
+  f_minus_k <- fit_model(X_train[, -k, drop = FALSE], Y_train)
+
+  # Train model without features j and k
+  f_minus_jk <- fit_model(X_train[, -c(j, k), drop = FALSE], Y_train)
+
+  # Compute errors on test set
+  err_full <- error_fn(Y_test, predict_model(f_full, X_test))
+  err_minus_j <- error_fn(Y_test, predict_model(f_minus_j, X_test[, -j, drop = FALSE]))
+  err_minus_k <- error_fn(Y_test, predict_model(f_minus_k, X_test[, -k, drop = FALSE]))
+  err_minus_jk <- error_fn(Y_test, predict_model(f_minus_jk, X_test[, -c(j, k), drop = FALSE]))
+
+  # Compute deltas for each test sample
+  delta_j <- err_minus_j - err_full
+  delta_k <- err_minus_k - err_full
+  delta_jk <- err_minus_jk - err_full
+
+  # iLOCO for each test sample
+  iLOCO_samples <- delta_j + delta_k - delta_jk
+
+  # Point estimate and confidence interval
+  N_test <- length(test_idx)
+  iLOCO_mean <- mean(iLOCO_samples)
+  iLOCO_se <- sd(iLOCO_samples) / sqrt(N_test)
+  z_alpha <- qnorm(1 - alpha/2)
+
+  CI <- c(iLOCO_mean - z_alpha * iLOCO_se,
+          iLOCO_mean + z_alpha * iLOCO_se)
+
+  list(
+    iLOCO = iLOCO_mean,
+    CI = CI,
+    se = iLOCO_se,
+    delta_j = mean(delta_j),
+    delta_k = mean(delta_k),
+    delta_jk = mean(delta_jk),
+    samples = iLOCO_samples
+  )
+}
+```
+
+### Compute iLOCO for all feature pairs
+
+```{r}
+#' Compute iLOCO for all unique feature pairs
+#'
+#' @param X Feature matrix
+#' @param Y Response vector
+#' @param ... Additional arguments passed to iLOCO_split
+#' @return Data frame with iLOCO scores for all pairs
+iLOCO_all_pairs <- function(X, Y, ...) {
+  M <- ncol(X)
+  pairs <- combn(1:M, 2)
+
+  results <- data.frame(
+    j = integer(),
+    k = integer(),
+    iLOCO = numeric(),
+    CI_lower = numeric(),
+    CI_upper = numeric(),
+    delta_j = numeric(),
+    delta_k = numeric(),
+    delta_jk = numeric()
+  )
+
+  for (i in 1:ncol(pairs)) {
+    j <- pairs[1, i]
+    k <- pairs[2, i]
+
+    res <- iLOCO_split(X, Y, j, k, ...)
+
+    results <- rbind(results, data.frame(
+      j = j,
+      k = k,
+      iLOCO = res$iLOCO,
+      CI_lower = res$CI[1],
+      CI_upper = res$CI[2],
+      delta_j = res$delta_j,
+      delta_k = res$delta_k,
+      delta_jk = res$delta_jk
+    ))
+  }
+
+  results[order(-results$iLOCO), ]
+}
+```
+
+### Test on simulated data
+
+The true interaction is between features 1 and 2 (snr * X1 * X2).
+
+```{r}
+# Compute iLOCO for the true interacting pair (1,2)
+result_12 <- iLOCO_split(X, Y, j = 1, k = 2)
+cat("iLOCO(1,2):", result_12$iLOCO, "\n")
+cat("95% CI:", result_12$CI, "\n")
+cat("Delta_1:", result_12$delta_j, "\n")
+cat("Delta_2:", result_12$delta_k, "\n")
+cat("Delta_12:", result_12$delta_jk, "\n")
+```
+
+```{r}
+# Compute iLOCO for a null pair (no interaction)
+result_34 <- iLOCO_split(X, Y, j = 3, k = 4)
+cat("\niLOCO(3,4):", result_34$iLOCO, "\n")
+cat("95% CI:", result_34$CI, "\n")
+```
+
+### Compute for all pairs and rank
+
+```{r}
+set.seed(327)  # For reproducibility of split
+all_pairs <- iLOCO_all_pairs(X, Y)
+head(all_pairs, 10)
+```
+
+### Visualization
+
+```{r}
+library(ggplot2)
+
+# Add significance indicator
+all_pairs$significant <- all_pairs$CI_lower > 0
+
+# Create pair labels
+all_pairs$pair <- paste0("(", all_pairs$j, ",", all_pairs$k, ")")
+
+# Plot top 15 interactions
+top_pairs <- head(all_pairs, 15)
+top_pairs$pair <- factor(top_pairs$pair, levels = rev(top_pairs$pair))
+
+ggplot(top_pairs, aes(x = iLOCO, y = pair)) +
+  geom_point(aes(color = significant), size = 3) +
+  geom_errorbarh(aes(xmin = CI_lower, xmax = CI_upper), height = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "blue") +
+  scale_color_manual(values = c("FALSE" = "gray50", "TRUE" = "red")) +
+  labs(x = "iLOCO Score", y = "Feature Pair",
+       title = "Top 15 Feature Interactions by iLOCO",
+       subtitle = "Red = CI excludes zero (significant)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Success probability simulation
+
+Check if iLOCO correctly identifies (1,2) as the top interaction across multiple runs.
+
+```{r}
+simulate_success <- function(n_reps = 50, snr = 2) {
+  successes <- 0
+
+  for (rep in 1:n_reps) {
+    # Generate new data
+    X_sim <- matrix(rnorm(M*N), nrow = N, ncol = M)
+    f_X_sim <- snr*(X_sim[,1] * X_sim[,2]) + X_sim %*% B
+    Y_sim <- f_X_sim + rnorm(N)
+
+    # Compute iLOCO for all pairs
+    all_pairs_sim <- iLOCO_all_pairs(X_sim, Y_sim)
+
+    # Check if (1,2) is ranked first
+    top_pair <- all_pairs_sim[1, c("j", "k")]
+    if ((top_pair$j == 1 && top_pair$k == 2) ||
+        (top_pair$j == 2 && top_pair$k == 1)) {
+      successes <- successes + 1
+    }
+  }
+
+  successes / n_reps
+}
+
+# Run simulation (takes a few minutes)
+success_prob <- simulate_success(n_reps = 50)
+cat("Success probability:", success_prob, "\n")
+```
+
+## iLOCO via Minipatches (Algorithm 2)
+
+The minipatch approach is more computationally efficient - after fitting the minipatch ensemble,
+computing iLOCO for any pair is nearly free (no refitting needed).
+
+```{r}
+#' Fit minipatch ensemble
+#'
+#' @param X Feature matrix (N x M)
+#' @param Y Response vector
+#' @param B Number of minipatches
+#' @param n_frac Fraction of observations per minipatch
+#' @param m_frac Fraction of features per minipatch
+#' @param fit_model Base learner fitting function
+#' @return List with minipatch models and indices
+fit_minipatch_ensemble <- function(X, Y, B = 1000, n_frac = 0.2, m_frac = 0.2,
+                                    fit_model = NULL) {
+  N <- nrow(X)
+  M <- ncol(X)
+  n <- max(2, floor(n_frac * N))  # observations per minipatch
+  m <- max(2, floor(m_frac * M))  # features per minipatch
+
+  if (is.null(fit_model)) {
+    fit_model <- function(X, Y) lm(Y ~ ., data = data.frame(Y = Y, X))
+  }
+
+  models <- vector("list", B)
+  obs_idx <- vector("list", B)   # I_b: observation indices
+  feat_idx <- vector("list", B)  # F_b: feature indices
+
+  for (b in 1:B) {
+    # Sample observations and features
+    I_b <- sample(1:N, n, replace = FALSE)
+    F_b <- sample(1:M, m, replace = FALSE)
+
+    # Fit model on minipatch
+    X_b <- X[I_b, F_b, drop = FALSE]
+    Y_b <- Y[I_b]
+
+    models[[b]] <- tryCatch(
+      fit_model(X_b, Y_b),
+      error = function(e) NULL
+    )
+    obs_idx[[b]] <- I_b
+    feat_idx[[b]] <- F_b
+  }
+
+  list(
+    models = models,
+    obs_idx = obs_idx,
+    feat_idx = feat_idx,
+    N = N,
+    M = M,
+    B = B
+  )
+}
+
+#' Compute leave-one-out predictions from minipatch ensemble (vectorized)
+#'
+#' @param mp_ensemble Minipatch ensemble from fit_minipatch_ensemble
+#' @param X Feature matrix
+#' @param exclude_features Features to exclude (for LOCO prediction)
+#' @param predict_model Prediction function
+#' @return Matrix of LOO predictions (N x 1)
+predict_minipatch_loo <- function(mp_ensemble, X, exclude_features = NULL,
+                                   predict_model = NULL) {
+  if (is.null(predict_model)) {
+    predict_model <- function(model, X) predict(model, newdata = data.frame(X))
+  }
+
+  N <- mp_ensemble$N
+  B <- mp_ensemble$B
+  predictions <- rep(0, N)
+  counts <- rep(0, N)
+
+  for (b in 1:B) {
+    model <- mp_ensemble$models[[b]]
+    if (is.null(model)) next
+
+    I_b <- mp_ensemble$obs_idx[[b]]
+    F_b <- mp_ensemble$feat_idx[[b]]
+
+    # Check if excluded features are NOT in this minipatch's feature set
+    if (!is.null(exclude_features)) {
+      if (any(exclude_features %in% F_b)) next
+    }
+
+    # For observations NOT in I_b (leave-one-out) - vectorized prediction
+    left_out <- setdiff(1:N, I_b)
+
+    # Predict all left-out observations at once
+    preds <- tryCatch(
+      predict_model(model, X[left_out, F_b, drop = FALSE]),
+      error = function(e) rep(NA, length(left_out))
+    )
+
+    # Accumulate predictions
+    valid <- !is.na(preds)
+    predictions[left_out[valid]] <- predictions[left_out[valid]] + preds[valid]
+    counts[left_out[valid]] <- counts[left_out[valid]] + 1
+  }
+
+  # Average predictions
+  predictions / pmax(counts, 1)
+}
+
+#' Compute iLOCO using minipatch ensemble
+#'
+#' @param mp_ensemble Minipatch ensemble
+#' @param X Feature matrix
+#' @param Y Response vector
+#' @param j First feature index
+#' @param k Second feature index
+#' @param error_fn Error function
+#' @param alpha Significance level for CI
+#' @return List with iLOCO estimate and CI
+iLOCO_MP <- function(mp_ensemble, X, Y, j, k,
+                     predict_model = NULL,
+                     error_fn = function(y, yhat) (y - yhat)^2,
+                     alpha = 0.1) {
+
+  if (is.null(predict_model)) {
+    predict_model <- function(model, X) predict(model, newdata = data.frame(X))
+  }
+
+  N <- nrow(X)
+
+  # Get LOO predictions for each model variant
+  pred_full <- predict_minipatch_loo(mp_ensemble, X, exclude_features = NULL, predict_model)
+  pred_minus_j <- predict_minipatch_loo(mp_ensemble, X, exclude_features = j, predict_model)
+  pred_minus_k <- predict_minipatch_loo(mp_ensemble, X, exclude_features = k, predict_model)
+  pred_minus_jk <- predict_minipatch_loo(mp_ensemble, X, exclude_features = c(j, k), predict_model)
+
+  # Compute errors
+  err_full <- error_fn(Y, pred_full)
+  err_minus_j <- error_fn(Y, pred_minus_j)
+  err_minus_k <- error_fn(Y, pred_minus_k)
+  err_minus_jk <- error_fn(Y, pred_minus_jk)
+
+  # Compute deltas
+  delta_j <- err_minus_j - err_full
+  delta_k <- err_minus_k - err_full
+  delta_jk <- err_minus_jk - err_full
+
+  # iLOCO for each sample
+  iLOCO_samples <- delta_j + delta_k - delta_jk
+
+  # Point estimate and CI
+  iLOCO_mean <- mean(iLOCO_samples, na.rm = TRUE)
+  iLOCO_se <- sd(iLOCO_samples, na.rm = TRUE) / sqrt(sum(!is.na(iLOCO_samples)))
+  z_alpha <- qnorm(1 - alpha/2)
+
+  CI <- c(iLOCO_mean - z_alpha * iLOCO_se,
+          iLOCO_mean + z_alpha * iLOCO_se)
+
+  list(
+    iLOCO = iLOCO_mean,
+    CI = CI,
+    se = iLOCO_se,
+    delta_j = mean(delta_j, na.rm = TRUE),
+    delta_k = mean(delta_k, na.rm = TRUE),
+    delta_jk = mean(delta_jk, na.rm = TRUE),
+    samples = iLOCO_samples
+  )
+}
+```
+
+### Test iLOCO-MP
+
+```{r}
+# Fit minipatch ensemble (this is done once)
+# Note: B=500 is faster for demos; paper uses B=10,000+ for stable inference
+set.seed(327)
+cat("Fitting minipatch ensemble...\n")
+mp_ensemble <- fit_minipatch_ensemble(X, Y, B = 500, n_frac = 0.2, m_frac = 0.5)
+cat("Done! Fitted", mp_ensemble$B, "minipatches\n")
+
+# Compute iLOCO-MP for the true interaction
+cat("\nComputing iLOCO-MP predictions...\n")
+result_mp_12 <- iLOCO_MP(mp_ensemble, X, Y, j = 1, k = 2)
+cat("iLOCO-MP(1,2):", result_mp_12$iLOCO, "\n")
+cat("90% CI:", result_mp_12$CI, "\n")
+
+# Compute for a null pair
+result_mp_34 <- iLOCO_MP(mp_ensemble, X, Y, j = 3, k = 4)
+cat("\niLOCO-MP(3,4):", result_mp_34$iLOCO, "\n")
+cat("90% CI:", result_mp_34$CI, "\n")
+```
+
+### Summary: iLOCO-Split vs iLOCO-MP
+
+**iLOCO-Split** (recommended for most uses):
+- Simple train/test split approach
+- Trains 4 models per pair: full, -j, -k, -(j,k)
+- Easy to understand and implement
+- Works with any model class
+
+**iLOCO-MP** (from paper):
+- Fits minipatch ensemble once
+- After fitting, iLOCO computation requires no additional model fitting
+- Computationally efficient for large-scale analysis
+- Better for production use with many pairs
+
+For this demo, **iLOCO-Split is faster and simpler**. The minipatch method shines when:
+1. You have many feature pairs to evaluate
+2. You're using expensive base learners (neural nets, etc.)
+3. You want to avoid data splitting
+
+```{r}
+# Compare the two methods on the true interaction pair
+cat("Method comparison for pair (1,2):\n")
+cat("iLOCO-Split:", result_12$iLOCO, "\n")
+cat("iLOCO-MP:   ", result_mp_12$iLOCO, "\n")
+```
+
+### Interpretation of Results
+
+A **positive iLOCO** value indicates the features j and k interact to improve predictions
+beyond their individual effects.
+
+A **negative iLOCO** can indicate correlated features that compensate for each other
+(see Section 2.5 of the paper).
+
+```{r}
+# Show interpretation for our results
+cat("Results interpretation:\n\n")
+cat("Pair (1,2) - TRUE interaction:\n")
+cat("  iLOCO =", round(result_12$iLOCO, 4), "\n")
+cat("  CI excludes 0:", result_12$CI[1] > 0, "(significant)\n\n")
+
+cat("Pair (3,4) - NULL (no interaction):\n")
+cat("  iLOCO =", round(result_34$iLOCO, 4), "\n")
+cat("  CI contains 0:", result_34$CI[1] <= 0 && result_34$CI[2] >= 0, "(not significant)\n")
+```
+
+## Higher-Order iLOCO (S-way interactions)
+
+For S-way interactions, the iLOCO metric generalizes to:
+
+$$\text{iLOCO}_S = \sum_{T \subseteq S, T \neq \emptyset} (-1)^{|T|+1} \Delta_T$$
+
+```{r}
+#' Compute higher-order iLOCO via data splitting
+#'
+#' @param X Feature matrix
+#' @param Y Response vector
+#' @param S Vector of feature indices for the interaction
+#' @param train_frac Training fraction
+#' @return List with iLOCO estimate
+iLOCO_higher_order <- function(X, Y, S, train_frac = 0.5,
+                                fit_model = NULL, predict_model = NULL,
+                                error_fn = function(y, yhat) (y - yhat)^2) {
+
+  if (is.null(fit_model)) {
+    fit_model <- function(X, Y) lm(Y ~ ., data = data.frame(Y = Y, X))
+  }
+  if (is.null(predict_model)) {
+    predict_model <- function(model, X) predict(model, newdata = data.frame(X))
+  }
+
+  N <- nrow(X)
+
+  # Split data
+  train_idx <- sample(1:N, size = floor(train_frac * N))
+  test_idx <- setdiff(1:N, train_idx)
+
+  X_train <- X[train_idx, , drop = FALSE]
+  Y_train <- Y[train_idx]
+  X_test <- X[test_idx, , drop = FALSE]
+  Y_test <- Y[test_idx]
+
+  # Train full model and compute baseline error
+  f_full <- fit_model(X_train, Y_train)
+  err_full <- error_fn(Y_test, predict_model(f_full, X_test))
+
+  # Generate all non-empty subsets of S
+  n_S <- length(S)
+  subsets <- list()
+  for (size in 1:n_S) {
+    combos <- combn(S, size, simplify = FALSE)
+    subsets <- c(subsets, combos)
+  }
+
+  # Compute Delta_T for each subset T
+  iLOCO_samples <- rep(0, length(test_idx))
+
+  for (T in subsets) {
+    # Train model without features in T
+    f_minus_T <- fit_model(X_train[, -T, drop = FALSE], Y_train)
+    err_minus_T <- error_fn(Y_test, predict_model(f_minus_T, X_test[, -T, drop = FALSE]))
+
+    delta_T <- err_minus_T - err_full
+
+    # Add to iLOCO with alternating sign
+    sign <- (-1)^(length(T) + 1)
+    iLOCO_samples <- iLOCO_samples + sign * delta_T
+  }
+
+  list(
+    iLOCO = mean(iLOCO_samples),
+    se = sd(iLOCO_samples) / sqrt(length(test_idx)),
+    samples = iLOCO_samples
+  )
+}
+```
+
+### Test third-order interaction
+
+```{r}
+# Generate data with a third-order interaction (Scenario iii)
+set.seed(42)
+X_3way <- matrix(rnorm(M*N), nrow = N, ncol = M)
+f_X_3way <- snr * (X_3way[,1] * X_3way[,2] * X_3way[,3]) + X_3way %*% B
+Y_3way <- f_X_3way + rnorm(N)
+
+# Test 2nd order iLOCO on the 3-way interaction data
+result_2nd <- iLOCO_split(X_3way, Y_3way, j = 1, k = 2)
+cat("2nd-order iLOCO(1,2) on 3-way data:", result_2nd$iLOCO, "\n")
+
+# Test 3rd order iLOCO
+result_3rd <- iLOCO_higher_order(X_3way, Y_3way, S = c(1, 2, 3))
+cat("3rd-order iLOCO(1,2,3):", result_3rd$iLOCO, "\n")
+
+# Compare to a null triplet
+result_3rd_null <- iLOCO_higher_order(X_3way, Y_3way, S = c(4, 5, 6))
+cat("3rd-order iLOCO(4,5,6) [null]:", result_3rd_null$iLOCO, "\n")
+```
+
+
+
+
+
+
+
