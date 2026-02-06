@@ -156,12 +156,13 @@ class UNet(nn.Module):
         return x
 
 
-class Sampler:
+class Sampler(nn.Module):
     def __init__(self, num_steps=1000, beta_start=1e-4, beta_end=0.02):
+        super().__init__()
         self.num_steps = num_steps
-        self.betas = torch.linspace(beta_start, beta_end, num_steps)
-        self.alphas = 1.0 - self.betas
-        self.alpha_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.register_buffer("betas", torch.linspace(beta_start, beta_end, num_steps))
+        self.register_buffer("alphas", 1.0 - self.betas)
+        self.register_buffer("alpha_cumprod", torch.cumprod(self.alphas, dim=0))
     
     def _repeated_unsqueeze(self, x, target_dim):
         while x.dim() < target_dim.dim():
@@ -169,10 +170,7 @@ class Sampler:
         return x
     
     def add_noise(self, inputs, timesteps):
-        b, c, h, w = inputs.shape
-        device = inputs.device
-        
-        alpha_timesteps = self.alpha_cumprod[timesteps.cpu()].to(device)
+        alpha_timesteps = self.alpha_cumprod[timesteps]
         
         mu_coeff = alpha_timesteps ** 0.5
         sigma_coeff = (1 - alpha_timesteps) ** 0.5
@@ -185,15 +183,12 @@ class Sampler:
         return noisy_inputs, noise
     
     def remove_noise(self, x_t, timestep, pred_noise):
-        b, c, h, w = x_t.shape
-        device = x_t.device
-        
         equal_zero_mask = (timestep == 0)
         
-        beta_t = self.betas[timestep].to(device)
-        alpha_t = self.alphas[timestep].to(device)
-        alpha_cumprod_t = self.alpha_cumprod[timestep].to(device)
-        alpha_cumprod_prev = self.alpha_cumprod[timestep - 1].to(device)
+        beta_t = self.betas[timestep]
+        alpha_t = self.alphas[timestep]
+        alpha_cumprod_t = self.alpha_cumprod[timestep]
+        alpha_cumprod_prev = self.alpha_cumprod[timestep - 1]
         alpha_cumprod_prev[equal_zero_mask] = 1.0
         
         noise = torch.randn_like(x_t)
@@ -202,7 +197,7 @@ class Sampler:
         var = self._repeated_unsqueeze(var, x_t)
         
         sigma_t_z = noise * var ** 0.5
-        sigma_t_z[self._repeated_unsqueeze(equal_zero_mask, x_t)] = 0.0
+        sigma_t_z[equal_zero_mask] = 0.0
         
         noise_coeff = beta_t / (1 - alpha_cumprod_t) ** 0.5
         noise_coeff = self._repeated_unsqueeze(noise_coeff, x_t)
