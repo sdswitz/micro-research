@@ -107,3 +107,4 @@ loss_history_df = pd.DataFrame({
     'train_loss': train_losses,
     'test_loss': [test_loss_dict.get(e, None) for e in range(1, EPOCHS + 1)]
 })
+loss_history_df.to_csv("loss_history.csv", index=False)
