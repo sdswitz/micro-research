@@ -10,4 +10,6 @@ __pycache__/
 input.txt
 env/
 venv/
+data/
 diffusion/data/
+diffusion-2/data/
