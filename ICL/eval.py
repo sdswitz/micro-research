@@ -3,7 +3,7 @@
 import torch
 import torch.nn.functional as F
 
-from data import make_batch_xy, make_batch_xy_fixed_padded
+from data import make_batch, make_batch_fixed_n_ctx
 
 
 @torch.no_grad()
@@ -77,7 +77,7 @@ def eval_rmse(model, d: int, n_ctx: int, batch_size: int = 2048, noise_std: floa
     """
     model.eval()
 
-    seq, yq = make_batch_xy(batch_size, n_ctx, d, noise_std=noise_std)
+    seq, yq = make_batch(batch_size, n_ctx, d, noise_std=noise_std)
     seq, yq = seq.to(device), yq.to(device)
 
     pred = model(seq)
@@ -118,7 +118,7 @@ def sweep_context_lengths(
     results = []
 
     for n_ctx in n_ctx_list:
-        seq, yq, pad_mask = make_batch_xy_fixed_padded(
+        seq, yq, pad_mask = make_batch_fixed_n_ctx(
             batch_size, n_ctx, d, n_ctx_max=n_ctx_max, noise_std=noise_std
         )
         seq, yq, pad_mask = seq.to(device), yq.to(device), pad_mask.to(device)
@@ -167,7 +167,7 @@ def eval_suite(
     """
     model.eval()
 
-    seq, yq = make_batch_xy(batch_size, n_ctx, d, noise_std=noise_std)
+    seq, yq = make_batch(batch_size, n_ctx, d, noise_std=noise_std)
     seq, yq = seq.to(device), yq.to(device)
 
     # Normal evaluation

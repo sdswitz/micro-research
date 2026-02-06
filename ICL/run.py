@@ -3,8 +3,6 @@
 
 import torch
 
-from data import make_batch_xy_padded
-from model import create_model
 from eval import sweep_context_lengths, eval_suite
 from train import train
 

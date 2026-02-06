@@ -1,125 +1,131 @@
-"""Data generation utilities for in-context learning experiments."""
+"""
+Data generation for in-context learning linear regression.
+
+Token format:
+    - Each token is (d+1)-dimensional: [x, y] where x is d-dim and y is scalar
+    - Context tokens (positions 0 to n_ctx-1): [x_i, y_i] training examples
+    - Query token (last position): [x_query, 0] - model predicts y_query
+
+Sequence structure:
+    [x_1, y_1]  [x_2, y_2]  ...  [x_n, y_n]  [x_query, 0]
+    |___________ context ___________|        |__ query __|
+"""
 
 import torch
 
 
-def make_batch(batch_size: int, n_ctx: int, d: int, noise_std: float = 0.05, w_std: float = 1.0):
+def make_batch(
+    batch_size: int,
+    n_ctx: int,
+    d: int,
+    noise_std: float = 0.05,
+    w_std: float = 1.0,
+):
     """
-    Generate a batch with alternating x and y tokens.
+    Generate a batch of in-context linear regression tasks.
+
+    Each task has a random weight vector w, and the model must predict
+    y_query = x_query @ w from context examples {(x_i, y_i)}.
+
+    Args:
+        batch_size: Number of independent tasks
+        n_ctx: Number of context (training) examples per task
+        d: Input dimension
+        noise_std: Gaussian noise added to y values
+        w_std: Standard deviation of weight vectors
 
     Returns:
-        seq: (B, 2*n_ctx+1, d+1) sequence with alternating [x_i, 0...0] and [0...0, y_i] tokens
-        types: (B, 2*n_ctx+1) token type indicators (0=x, 1=y)
-        yq: (B,) target y for the query
+        seq: (B, n_ctx+1, d+1) - context tokens [x_i, y_i] then query [x_q, 0]
+        y_query: (B,) - target y values to predict
     """
     B = batch_size
-    n = n_ctx
-    Din = d + 1
-    L = 2 * n + 1
+    L = n_ctx + 1  # context + query
+    D_token = d + 1  # [x, y] per token
 
+    # Random linear model per task
     w = torch.randn(B, d) * w_std
 
-    X = torch.randn(B, n, d)
-    y = (X * w[:, None, :]).sum(dim=-1) + noise_std * torch.randn(B, n)
+    # Context examples
+    X_ctx = torch.randn(B, n_ctx, d)
+    y_ctx = (X_ctx * w[:, None, :]).sum(dim=-1) + noise_std * torch.randn(B, n_ctx)
 
-    xq = torch.randn(B, d)
-    yq = (xq * w).sum(dim=-1) + noise_std * torch.randn(B)
+    # Query example
+    x_query = torch.randn(B, d)
+    y_query = (x_query * w).sum(dim=-1) + noise_std * torch.randn(B)
 
-    seq = torch.zeros(B, L, Din)
-    types = torch.zeros(B, L, dtype=torch.long)
+    # Build sequence: [x_1, y_1], [x_2, y_2], ..., [x_n, y_n], [x_query, 0]
+    seq = torch.zeros(B, L, D_token)
+    seq[:, :n_ctx, :d] = X_ctx      # context x values
+    seq[:, :n_ctx, -1] = y_ctx      # context y values
+    seq[:, -1, :d] = x_query        # query x value
+    # seq[:, -1, -1] = 0            # query y slot (already zero)
 
-    for i in range(n):
-        xi_pos = 2 * i
-        yi_pos = 2 * i + 1
-        seq[:, xi_pos, :d] = X[:, i, :]
-        seq[:, yi_pos, -1] = y[:, i]
-        types[:, yi_pos] = 1
-
-    seq[:, -1, :d] = xq
-    types[:, -1] = 0
-    return seq, types, yq
+    return seq, y_query
 
 
-def make_batch_xy(batch_size: int, n_ctx: int, d: int, noise_std: float = 0.05, w_std: float = 1.0):
-    """
-    Generate a batch with combined [x_i, y_i] tokens.
-
-    Returns:
-        seq: (B, n_ctx+1, d+1) where tokens 0..n_ctx-1 are [x_i, y_i] and token n_ctx is [x_query, 0]
-        yq: (B,) target y for the query
-    """
-    B = batch_size
-    L = n_ctx + 1
-    Din = d + 1
-
-    w = torch.randn(B, d) * w_std
-
-    X = torch.randn(B, n_ctx, d)
-    y = (X * w[:, None, :]).sum(dim=-1) + noise_std * torch.randn(B, n_ctx)
-
-    xq = torch.randn(B, d)
-    yq = (xq * w).sum(dim=-1) + noise_std * torch.randn(B)
-
-    seq = torch.zeros(B, L, Din)
-    seq[:, :n_ctx, :d] = X
-    seq[:, :n_ctx, -1] = y
-    seq[:, -1, :d] = xq
-    seq[:, -1, -1] = 0.0
-
-    return seq, yq
-
-
-def make_batch_xy_padded(
+def make_batch_padded(
     batch_size: int,
     d: int,
     n_ctx_max: int = 128,
+    n_ctx_min: int = 2,
     noise_std: float = 0.05,
     w_std: float = 1.0,
-    n_ctx_min: int = 2,
 ):
     """
-    Generate a batch with variable context lengths (padded to n_ctx_max).
+    Generate a batch with variable context lengths, padded to n_ctx_max.
+
+    Args:
+        batch_size: Number of independent tasks
+        d: Input dimension
+        n_ctx_max: Maximum context length (sequence padded to this)
+        n_ctx_min: Minimum context length
+        noise_std: Gaussian noise added to y values
+        w_std: Standard deviation of weight vectors
 
     Returns:
-        seq: (B, n_ctx_max+1, d+1) padded sequence
-        yq: (B,) target y for the query
-        pad_mask: (B, n_ctx_max+1) boolean mask (True = padded position)
-        n_ctx: (B,) actual context length per example
+        seq: (B, n_ctx_max+1, d+1) - padded sequence
+        y_query: (B,) - target y values to predict
+        pad_mask: (B, n_ctx_max+1) - True for padded positions
+        n_ctx: (B,) - actual context length per task
     """
     B = batch_size
     L = n_ctx_max + 1
-    Din = d + 1
+    D_token = d + 1
 
+    # Random context length per task
     n_ctx = torch.randint(low=n_ctx_min, high=n_ctx_max + 1, size=(B,))
 
+    # Random linear model per task
     w = torch.randn(B, d) * w_std
 
-    X = torch.randn(B, n_ctx_max, d)
-    y = (X * w[:, None, :]).sum(dim=-1) + noise_std * torch.randn(B, n_ctx_max)
+    # Generate max context (will mask out extras)
+    X_ctx = torch.randn(B, n_ctx_max, d)
+    y_ctx = (X_ctx * w[:, None, :]).sum(dim=-1) + noise_std * torch.randn(B, n_ctx_max)
 
-    idx = torch.arange(n_ctx_max).unsqueeze(0)
-    real = idx < n_ctx.unsqueeze(1)
+    # Query
+    x_query = torch.randn(B, d)
+    y_query = (x_query * w).sum(dim=-1) + noise_std * torch.randn(B)
 
-    seq = torch.zeros(B, L, Din)
+    # Mask: True = padded (ignored), False = real token
+    idx = torch.arange(n_ctx_max).unsqueeze(0)  # (1, n_ctx_max)
+    is_real = idx < n_ctx.unsqueeze(1)          # (B, n_ctx_max)
+
+    # Build sequence
+    seq = torch.zeros(B, L, D_token)
+    seq[:, :n_ctx_max, :d] = X_ctx * is_real.unsqueeze(-1)  # zero out padded x
+    seq[:, :n_ctx_max, -1] = y_ctx * is_real                 # zero out padded y
+    seq[:, -1, :d] = x_query
+
+    # Padding mask
     pad_mask = torch.ones(B, L, dtype=torch.bool)
+    pad_mask[:, :n_ctx_max] = ~is_real
+    pad_mask[:, -1] = False  # query is never padded
 
-    seq[:, :n_ctx_max, :d] = X
-    seq[:, :n_ctx_max, -1] = y
-    pad_mask[:, :n_ctx_max] = ~real
-
-    xq = torch.randn(B, d)
-    yq = (xq * w).sum(dim=-1) + noise_std * torch.randn(B)
-
-    seq[:, -1, :d] = xq
-    pad_mask[:, -1] = False
-
-    seq[:, :n_ctx_max, :] *= real.unsqueeze(-1)
-
-    return seq, yq, pad_mask, n_ctx
+    return seq, y_query, pad_mask, n_ctx
 
 
 @torch.no_grad()
-def make_batch_xy_fixed_padded(
+def make_batch_fixed_n_ctx(
     batch_size: int,
     n_ctx: int,
     d: int,
@@ -130,32 +136,53 @@ def make_batch_xy_fixed_padded(
     """
     Generate a batch with fixed context length, padded to n_ctx_max.
 
+    Useful for evaluation at specific context lengths.
+
+    Args:
+        batch_size: Number of independent tasks
+        n_ctx: Context length (same for all tasks)
+        d: Input dimension
+        n_ctx_max: Sequence length for padding
+        noise_std: Gaussian noise added to y values
+        w_std: Standard deviation of weight vectors
+
     Returns:
-        seq: (B, n_ctx_max+1, d+1) padded sequence
-        yq: (B,) target y for the query
-        pad_mask: (B, n_ctx_max+1) boolean mask (True = padded position)
+        seq: (B, n_ctx_max+1, d+1) - padded sequence
+        y_query: (B,) - target y values to predict
+        pad_mask: (B, n_ctx_max+1) - True for padded positions
     """
-    assert n_ctx <= n_ctx_max
+    assert n_ctx <= n_ctx_max, f"n_ctx ({n_ctx}) must be <= n_ctx_max ({n_ctx_max})"
+
     B = batch_size
     L = n_ctx_max + 1
-    Din = d + 1
+    D_token = d + 1
 
+    # Random linear model per task
     w = torch.randn(B, d) * w_std
 
-    X = torch.randn(B, n_ctx, d)
-    y = (X * w[:, None, :]).sum(dim=-1) + noise_std * torch.randn(B, n_ctx)
+    # Context examples
+    X_ctx = torch.randn(B, n_ctx, d)
+    y_ctx = (X_ctx * w[:, None, :]).sum(dim=-1) + noise_std * torch.randn(B, n_ctx)
 
-    xq = torch.randn(B, d)
-    yq = (xq * w).sum(dim=-1) + noise_std * torch.randn(B)
+    # Query
+    x_query = torch.randn(B, d)
+    y_query = (x_query * w).sum(dim=-1) + noise_std * torch.randn(B)
 
-    seq = torch.zeros(B, L, Din)
+    # Build padded sequence
+    seq = torch.zeros(B, L, D_token)
+    seq[:, :n_ctx, :d] = X_ctx
+    seq[:, :n_ctx, -1] = y_ctx
+    seq[:, -1, :d] = x_query
+
+    # Padding mask: positions n_ctx to n_ctx_max-1 are padded
     pad_mask = torch.ones(B, L, dtype=torch.bool)
+    pad_mask[:, :n_ctx] = False   # context is real
+    pad_mask[:, -1] = False       # query is real
 
-    seq[:, :n_ctx, :d] = X
-    seq[:, :n_ctx, -1] = y
-    pad_mask[:, :n_ctx] = False
+    return seq, y_query, pad_mask
 
-    seq[:, -1, :d] = xq
-    pad_mask[:, -1] = False
 
-    return seq, yq, pad_mask
+# Aliases for backward compatibility
+make_batch_xy = make_batch
+make_batch_xy_padded = make_batch_padded
+make_batch_xy_fixed_padded = make_batch_fixed_n_ctx

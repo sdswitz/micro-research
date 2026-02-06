@@ -32,19 +32,20 @@ def get_attention_weights(
 
     # Compute input embeddings
     pos = torch.arange(L, device=device).unsqueeze(0).expand(B, L)
-    types = torch.zeros(B, L, dtype=torch.long, device=device)
-    types[:, -1] = 1
+    h = model.in_proj(seq) + model.pos_emb(pos)
 
-    h = model.in_proj(seq) + model.pos_emb(pos) + model.type_emb(types)
+    # Get causal mask
+    causal_mask = model.causal_mask[:L, :L]
 
     # Run through each layer manually to capture attention
-    for layer in model.encoder.layers:
+    for layer in model.layers:
         # Pre-norm
         h_norm = layer.norm1(h)
 
         # Self-attention with weights
         attn_out, attn_weights = layer.self_attn(
             h_norm, h_norm, h_norm,
+            attn_mask=causal_mask,
             key_padding_mask=pad_mask,
             need_weights=True,
             average_attn_weights=False,  # Get per-head weights
@@ -56,7 +57,7 @@ def get_attention_weights(
         h = h + layer.linear2(layer.activation(layer.linear1(layer.norm2(h))))
 
     # Final norm and output
-    h = model.encoder.norm(h)
+    h = model.norm(h)
     pred = model.out(h[:, -1, :]).squeeze(-1)
 
     return pred, attentions
