@@ -7,40 +7,6 @@ import numpy as np
 from typing import List, Dict, Optional, Tuple
 
 
-class AttentionCapture:
-    """Context manager to capture attention weights from a transformer."""
-
-    def __init__(self, model: nn.Module):
-        self.model = model
-        self.attention_weights: List[torch.Tensor] = []
-        self.hooks = []
-
-    def __enter__(self):
-        self.attention_weights = []
-
-        # Register hooks on all MultiheadAttention modules
-        for name, module in self.model.named_modules():
-            if isinstance(module, nn.MultiheadAttention):
-                hook = module.register_forward_hook(self._capture_attention)
-                self.hooks.append(hook)
-
-        return self
-
-    def __exit__(self, *args):
-        for hook in self.hooks:
-            hook.remove()
-        self.hooks = []
-
-    def _capture_attention(self, module, input, output):
-        # MultiheadAttention returns (attn_output, attn_weights) when need_weights=True
-        # But by default it doesn't return weights, so we need to compute them manually
-        # We'll use a different approach: register a hook that modifies the forward
-        pass
-
-    def get_weights(self) -> List[torch.Tensor]:
-        return self.attention_weights
-
-
 def get_attention_weights(
     model: nn.Module,
     seq: torch.Tensor,
@@ -100,9 +66,9 @@ def plot_attention_heatmap(
     attn: torch.Tensor,
     layer: int = 0,
     head: int = 0,
-    n_ctx: int = None,
-    title: str = None,
-    ax: plt.Axes = None,
+    n_ctx: Optional[int] = None,
+    title: Optional[str] = None,
+    ax: Optional[plt.Axes] = None,
     cmap: str = "Blues",
 ):
     """
@@ -135,9 +101,9 @@ def plot_attention_heatmap(
     # Add colorbar
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
-    # Mark query token
+    # Mark context boundary (query is at last position L-1)
     if n_ctx is not None:
-        ax.axhline(y=n_ctx, color="red", linestyle="--", alpha=0.5, label="Query")
+        ax.axhline(y=n_ctx, color="red", linestyle="--", alpha=0.5, label="Context end")
         ax.axvline(x=n_ctx, color="red", linestyle="--", alpha=0.5)
 
     return ax
@@ -146,8 +112,8 @@ def plot_attention_heatmap(
 def plot_query_attention(
     attn: torch.Tensor,
     layer: int = 0,
-    n_ctx: int = None,
-    ax: plt.Axes = None,
+    n_ctx: Optional[int] = None,
+    ax: Optional[plt.Axes] = None,
 ):
     """
     Plot what the query token attends to across all heads.
@@ -155,16 +121,16 @@ def plot_query_attention(
     Args:
         attn: (B, n_heads, L, L) attention weights
         layer: Layer index
-        n_ctx: Context length
+        n_ctx: Context length (for marking on plot, not for finding query)
         ax: Matplotlib axes
     """
     if ax is None:
         fig, ax = plt.subplots(figsize=(10, 4))
 
-    # Get query row (last position) for first batch element
+    # Get query row (always last position) for first batch element
     n_heads = attn.shape[1]
     L = attn.shape[2]
-    query_idx = L - 1 if n_ctx is None else n_ctx
+    query_idx = L - 1  # Query is always at the last position
 
     query_attn = attn[0, :, query_idx, :].cpu().numpy()  # (n_heads, L)
 
@@ -180,15 +146,15 @@ def plot_query_attention(
     ax.legend(loc="upper right", fontsize="small")
 
     if n_ctx is not None:
-        ax.axvline(x=n_ctx, color="red", linestyle="--", alpha=0.5, label="Query pos")
+        ax.axvline(x=n_ctx, color="red", linestyle="--", alpha=0.5, label="Context end")
 
     return ax
 
 
 def plot_all_layers_query_attention(
     attentions: List[torch.Tensor],
-    n_ctx: int = None,
-    figsize: Tuple[int, int] = None,
+    n_ctx: Optional[int] = None,
+    figsize: Optional[Tuple[int, int]] = None,
 ):
     """
     Plot query attention patterns for all layers.
@@ -203,12 +169,10 @@ def plot_all_layers_query_attention(
     if figsize is None:
         figsize = (12, 3 * n_layers)
 
-    fig, axes = plt.subplots(n_layers, 1, figsize=figsize)
-    if n_layers == 1:
-        axes = [axes]
+    fig, axes = plt.subplots(n_layers, 1, figsize=figsize, squeeze=False)
 
     for layer, attn in enumerate(attentions):
-        plot_query_attention(attn, layer=layer, n_ctx=n_ctx, ax=axes[layer])
+        plot_query_attention(attn, layer=layer, n_ctx=n_ctx, ax=axes[layer, 0])
 
     plt.tight_layout()
     return fig
@@ -216,8 +180,8 @@ def plot_all_layers_query_attention(
 
 def plot_attention_grid(
     attentions: List[torch.Tensor],
-    n_ctx: int = None,
-    figsize: Tuple[int, int] = None,
+    n_ctx: Optional[int] = None,
+    figsize: Optional[Tuple[int, int]] = None,
 ):
     """
     Plot attention heatmaps for all layers and heads.
@@ -267,7 +231,7 @@ def analyze_attention_patterns(
 
     Args:
         attentions: List of (B, n_heads, L, L) per layer
-        n_ctx: Context length
+        n_ctx: Context length (number of context tokens, not query position)
 
     Returns:
         Dictionary with analysis results
@@ -275,6 +239,8 @@ def analyze_attention_patterns(
     results = {}
     n_layers = len(attentions)
     n_heads = attentions[0].shape[1]
+    L = attentions[0].shape[2]
+    query_idx = L - 1  # Query is always at the last position
 
     # How much does query attend to context vs itself?
     query_to_context = torch.zeros(n_layers, n_heads)
@@ -285,11 +251,11 @@ def analyze_attention_patterns(
 
     for layer, attn in enumerate(attentions):
         # attn: (B, n_heads, L, L)
-        # Query is at position n_ctx (last position)
-        query_attn = attn[0, :, n_ctx, :]  # (n_heads, L)
+        # Query is at last position, context is at positions 0..n_ctx-1
+        query_attn = attn[0, :, query_idx, :]  # (n_heads, L)
 
         query_to_context[layer] = query_attn[:, :n_ctx].sum(dim=-1)
-        query_to_self[layer] = query_attn[:, n_ctx]
+        query_to_self[layer] = query_attn[:, query_idx]
         context_attention[layer] = query_attn[:, :n_ctx]
 
     results["query_to_context"] = query_to_context  # (n_layers, n_heads)
