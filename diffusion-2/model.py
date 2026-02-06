@@ -40,7 +40,8 @@ class TimestepEmbedding(nn.Module):
         self.emb_dim = emb_dim
         self.linear1 = nn.Linear(emb_dim, emb_dim)
         self.linear2 = nn.Linear(emb_dim, emb_dim)
-        freqs = torch.tensor(10000 ** (-(2 * torch.arange(0, emb_dim//2)) / emb_dim))
+        # freqs = torch.tensor(10000 ** (-(2 * torch.arange(0, emb_dim//2)) / emb_dim))
+        freqs = (10000 ** (-(2 * torch.arange(0, emb_dim//2)) / emb_dim)).clone()
         self.register_buffer('freqs', freqs)
         
     def forward(self, t):
@@ -170,9 +171,8 @@ class Sampler:
     def add_noise(self, inputs, timesteps):
         b, c, h, w = inputs.shape
         device = inputs.device
-        timesteps = timesteps.to(device)
         
-        alpha_timesteps = self.alpha_cumprod[timesteps].to(device)
+        alpha_timesteps = self.alpha_cumprod[timesteps.cpu()].to(device)
         
         mu_coeff = alpha_timesteps ** 0.5
         sigma_coeff = (1 - alpha_timesteps) ** 0.5
