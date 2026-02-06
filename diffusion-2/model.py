@@ -170,6 +170,7 @@ class Sampler:
     def add_noise(self, inputs, timesteps):
         b, c, h, w = inputs.shape
         device = inputs.device
+        timesteps = timesteps.to(device)
         
         alpha_timesteps = self.alpha_cumprod[timesteps].to(device)
         
