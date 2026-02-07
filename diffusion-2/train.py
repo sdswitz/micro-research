@@ -24,7 +24,7 @@ train_data = datasets.CIFAR100(root=train_data_path, train=True, download=True, 
 test_data = datasets.CIFAR100(root=test_data_path, train=False, download=True, transform=transform)
 print("successfully loaded data")
 
-EPOCHS = 10
+EPOCHS = 400
 lr = 2e-4
 
 batch_size = 128
