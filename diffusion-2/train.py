@@ -39,7 +39,7 @@ save_interval = int(EPOCHS / 4)
 train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True) #, num_workers=2)
 test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False) #, num_workers=2)
 
-sampler = Sampler()
+sampler = Sampler().to(device)
 model = UNet(in_channels=input_channels, out_channels=input_channels, num_classes=num_classes)
 model = model.to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr)
