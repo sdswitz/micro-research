@@ -53,30 +53,40 @@ class TimestepEmbedding(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, num_heads=4, fused_attn=True):
         super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
         self.norm = nn.GroupNorm(32, channels)
         self.qkv = nn.Linear(channels, channels * 3)
         self.proj_out = nn.Linear(channels, channels)
+        self.fused_attn = fused_attn
         
     def forward(self, x):
         b, c, h, w = x.shape
         qkv = self.norm(x)
         qkv = qkv.reshape(b, c, h * w).permute(0, 2, 1)
-        qkv = self.qkv(qkv).reshape(b, h * w, 3, c).permute(2, 0, 1, 3)
+        qkv = self.qkv(qkv).reshape(b, h * w, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        
         q, k, v = qkv.unbind(0)
-        attn = torch.matmul(q, k.transpose(-2, -1)) * (c ** -0.5)
-        attn = F.softmax(attn, dim=-1)
-        out = torch.matmul(attn, v).permute(0, 2, 1).reshape(b, c, h, w)
-        out = self.proj_out(out.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+        
+        if self.fused_attn:
+            out = F.scaled_dot_product_attention(q, k, v)
+            out = out.transpose(1, 2).reshape(b, h * w, c)
+            out = self.proj_out(out).permute(0, 2, 1).reshape(b, c, h, w)
+        else:
+            attn = torch.matmul(q, k.transpose(-2, -1)) * (self.head_dim ** -0.5)
+            attn = F.softmax(attn, dim=-1)
+            out = torch.matmul(attn, v).permute(0, 2, 1).reshape(b, c, h, w)
+            
         return x + out
 
 
 class UNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3, num_classes=100, base_channels=64, emb_dim=256):
+    def __init__(self, in_channels=3, out_channels=3, base_channels=64, emb_dim=256):
         super().__init__()
         self.t_emb = TimestepEmbedding(emb_dim)
-        self.class_emb = nn.Embedding(num_classes, emb_dim)
         self.conv1 = nn.Conv2d(in_channels, base_channels, kernel_size=3, padding=1)
         
         self.encoder = nn.ModuleList([
@@ -106,13 +116,13 @@ class UNet(nn.Module):
             ResBlock(base_channels * 4, base_channels * 2, emb_dim),
             ResBlock(base_channels * 4, base_channels * 2, emb_dim),
             nn.Upsample(scale_factor=2, mode='nearest'),
-            # nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3, padding=1), should these be here?
+            nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3, padding=1),
             
             # stage 2
             ResBlock(base_channels * 4, base_channels * 2, emb_dim),
             ResBlock(base_channels * 4, base_channels * 2, emb_dim),
             nn.Upsample(scale_factor=2, mode='nearest'),
-            # nn.Conv2d(base_channels * 2, base_channels, kernel_size=3, padding=1), should these be here?
+            nn.Conv2d(base_channels * 2, base_channels * 2, kernel_size=3, padding=1),
             
             # stage 1
             ResBlock(base_channels * 3, base_channels, emb_dim),
@@ -125,8 +135,8 @@ class UNet(nn.Module):
             nn.Conv2d(base_channels, out_channels, kernel_size=3, padding=1)
         ])
         
-    def forward(self, x, t, labels):
-        t_emb = self.t_emb(t) + self.class_emb(labels)
+    def forward(self, x, t):
+        t_emb = self.t_emb(t)
         x = self.conv1(x)
         
         skips = []
